@@ -18,7 +18,8 @@ from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
-
+# TODO: 06/07/24 Stop here
+# TODO: Look into this UNet model first - What is this UNetModel?
 class ControlledUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         hs = []
@@ -30,7 +31,7 @@ class ControlledUnetModel(UNetModel):
                 h = module(h, emb, context)
                 hs.append(h)
             h = self.middle_block(h, emb, context)
-
+        
         if control is not None:
             h += control.pop()
 

@@ -46,5 +46,6 @@ for k in scratch_dict.keys():
         print(f'These weights are newly added: {k}')
 
 model.load_state_dict(target_dict, strict=True)
+# NOTE: Saves model's state dict to the desired output path
 torch.save(model.state_dict(), output_path)
 print('Done.')

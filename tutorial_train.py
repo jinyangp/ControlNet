@@ -15,7 +15,7 @@ learning_rate = 1e-5
 sd_locked = True
 only_mid_control = False
 
-
+# TODO: What is this model like?
 # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
 model = create_model('./models/cldm_v15.yaml').cpu()
 model.load_state_dict(load_state_dict(resume_path, location='cpu'))
@@ -25,9 +25,12 @@ model.only_mid_control = only_mid_control
 
 
 # Misc
+# TODO: What is this dataset like?
 dataset = MyDataset()
 dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=True)
+# TODO: What is this ImageLogger like?
 logger = ImageLogger(batch_frequency=logger_freq)
+# TODO: What is this Trainer like?
 trainer = pl.Trainer(gpus=1, precision=32, callbacks=[logger])
 
 

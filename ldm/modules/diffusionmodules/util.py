@@ -19,6 +19,7 @@ from ldm.util import instantiate_from_config
 
 
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+    # NOTE: Creates a beta schedule for the diffusion process based on different strategies: linear, cosine, sqrt_linear, and sqrt.
     if schedule == "linear":
         betas = (
                 torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
@@ -44,6 +45,8 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2,
 
 
 def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timesteps, verbose=True):
+    # NOTE: Generates timesteps for DDIM (Denoising Diffusion Implicit Model) sampling using either uniform 
+    # or quadratic discretization methods.
     if ddim_discr_method == 'uniform':
         c = num_ddpm_timesteps // num_ddim_timesteps
         ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
@@ -52,8 +55,6 @@ def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timestep
     else:
         raise NotImplementedError(f'There is no ddim discretization method called "{ddim_discr_method}"')
 
-    # assert ddim_timesteps.shape[0] == num_ddim_timesteps
-    # add one to get the final alpha values right (the ones from first scale to data during sampling)
     steps_out = ddim_timesteps + 1
     if verbose:
         print(f'Selected timesteps for ddim sampler: {steps_out}')
@@ -61,11 +62,9 @@ def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timestep
 
 
 def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=True):
-    # select alphas for computing the variance schedule
+    # NOTE: Computes DDIM sampling parameters including sigmas, alphas, and alphas_prev.
     alphas = alphacums[ddim_timesteps]
     alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
-
-    # according the the formula provided in https://arxiv.org/abs/2010.02502
     sigmas = eta * np.sqrt((1 - alphas_prev) / (1 - alphas) * (1 - alphas / alphas_prev))
     if verbose:
         print(f'Selected alphas for ddim sampler: a_t: {alphas}; a_(t-1): {alphas_prev}')
@@ -75,16 +74,7 @@ def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=True):
 
 
 def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
-    """
-    Create a beta schedule that discretizes the given alpha_t_bar function,
-    which defines the cumulative product of (1-beta) over time from t = [0,1].
-    :param num_diffusion_timesteps: the number of betas to produce.
-    :param alpha_bar: a lambda that takes an argument t from 0 to 1 and
-                      produces the cumulative product of (1-beta) up to that
-                      part of the diffusion process.
-    :param max_beta: the maximum beta to use; use values lower than 1 to
-                     prevent singularities.
-    """
+    # NOTE: Creates a beta schedule based on a given alpha_t_bar function, used for the cumulative product of (1-beta) over time.
     betas = []
     for i in range(num_diffusion_timesteps):
         t1 = i / num_diffusion_timesteps
@@ -94,21 +84,14 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
 
 
 def extract_into_tensor(a, t, x_shape):
+    # NOTE: Extracts values from a based on the indices t and reshapes them to match x_shape.
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
 def checkpoint(func, inputs, params, flag):
-    """
-    Evaluate a function without caching intermediate activations, allowing for
-    reduced memory at the expense of extra compute in the backward pass.
-    :param func: the function to evaluate.
-    :param inputs: the argument sequence to pass to `func`.
-    :param params: a sequence of parameters `func` depends on but does not
-                   explicitly take as arguments.
-    :param flag: if False, disable gradient checkpointing.
-    """
+    # NOTE: Evaluates a function without caching intermediate activations to save memory, at the cost of extra compute during the backward pass.
     if flag:
         args = tuple(inputs) + tuple(params)
         return CheckpointFunction.apply(func, len(inputs), *args)
@@ -117,6 +100,7 @@ def checkpoint(func, inputs, params, flag):
 
 
 class CheckpointFunction(torch.autograd.Function):
+    # NOTE: Custom autograd function to support checkpointing, which reduces memory usage during training by recomputing intermediate activations.
     @staticmethod
     def forward(ctx, run_function, length, *args):
         ctx.run_function = run_function
@@ -134,9 +118,6 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
         with torch.enable_grad(), \
                 torch.cuda.amp.autocast(**ctx.gpu_autocast_kwargs):
-            # Fixes a bug where the first op in run_function modifies the
-            # Tensor storage in place, which is not allowed for detach()'d
-            # Tensors.
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
         input_grads = torch.autograd.grad(
@@ -152,14 +133,7 @@ class CheckpointFunction(torch.autograd.Function):
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """
-    Create sinusoidal timestep embeddings.
-    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
-    """
+    # NOTE: Creates sinusoidal timestep embeddings for the diffusion process.
     if not repeat_only:
         half = dim // 2
         freqs = torch.exp(
@@ -175,53 +149,44 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
 
 
 def zero_module(module):
-    """
-    Zero out the parameters of a module and return it.
-    """
+    # NOTE: Sets all parameters of a given module to zero.
     for p in module.parameters():
         p.detach().zero_()
     return module
 
 
 def scale_module(module, scale):
-    """
-    Scale the parameters of a module and return it.
-    """
+    # NOTE: Scales all parameters of a given module by a specified factor.
     for p in module.parameters():
         p.detach().mul_(scale)
     return module
 
 
 def mean_flat(tensor):
-    """
-    Take the mean over all non-batch dimensions.
-    """
+    # NOTE: Computes the mean over all non-batch dimensions of a tensor.
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 
 def normalization(channels):
-    """
-    Make a standard normalization layer.
-    :param channels: number of input channels.
-    :return: an nn.Module for normalization.
-    """
+    # NOTE: Creates a standard normalization layer using GroupNorm with 32 groups.
     return GroupNorm32(32, channels)
 
 
 # PyTorch 1.7 has SiLU, but we support PyTorch 1.5.
 class SiLU(nn.Module):
+    # NOTE: Implementation of the SiLU (Swish) activation function.
     def forward(self, x):
         return x * torch.sigmoid(x)
 
 
 class GroupNorm32(nn.GroupNorm):
+    # NOTE: Extends GroupNorm to ensure compatibility with different data types.
     def forward(self, x):
         return super().forward(x.float()).type(x.dtype)
 
+
 def conv_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D convolution module.
-    """
+    # NOTE: Creates a convolutional layer with specified dimensions (1D, 2D, or 3D).
     if dims == 1:
         return nn.Conv1d(*args, **kwargs)
     elif dims == 2:
@@ -232,16 +197,12 @@ def conv_nd(dims, *args, **kwargs):
 
 
 def linear(*args, **kwargs):
-    """
-    Create a linear module.
-    """
+    # NOTE: Creates a linear layer.
     return nn.Linear(*args, **kwargs)
 
 
 def avg_pool_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D average pooling module.
-    """
+    # NOTE: Creates an average pooling layer with specified dimensions (1D, 2D, or 3D).
     if dims == 1:
         return nn.AvgPool1d(*args, **kwargs)
     elif dims == 2:
@@ -252,7 +213,7 @@ def avg_pool_nd(dims, *args, **kwargs):
 
 
 class HybridConditioner(nn.Module):
-
+    # NOTE: Combines two conditioning mechanisms: concatenation-based and cross-attention-based.
     def __init__(self, c_concat_config, c_crossattn_config):
         super().__init__()
         self.concat_conditioner = instantiate_from_config(c_concat_config)
@@ -265,6 +226,7 @@ class HybridConditioner(nn.Module):
 
 
 def noise_like(shape, device, repeat=False):
+    # NOTE: Generates noise with the specified shape and device. Optionally repeats the noise across the batch dimension.
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)
     return repeat_noise() if repeat else noise()
