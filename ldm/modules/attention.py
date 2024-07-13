@@ -319,7 +319,7 @@ class SpatialTransformer(nn.Module):
         self.use_linear = use_linear
 
     def forward(self, x, context=None):
-        # note: if no context is given, cross-attention defaults to self-attention
+        # NOTE: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context]
         b, c, h, w = x.shape

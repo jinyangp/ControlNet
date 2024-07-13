@@ -225,6 +225,8 @@ class ResBlock(TimestepBlock):
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
+            # NOTE: zero_module sets all parameters of a given module to zero
+            # In this case, all weights are initialised to 0
             zero_module(
                 conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)
             ),
@@ -308,6 +310,7 @@ class AttentionBlock(nn.Module):
             # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
+        # TODO: What is this zero_module?
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
@@ -471,7 +474,7 @@ class UNetModel(nn.Module):
         use_linear_in_transformer=False,
     ):
         super().__init__()
-        # NOTE: Check if spatial transformer is enabled, and ensure context dimension is provided if it is.
+        # STEP: Check if spatial transformer is enabled, and ensure context dimension is provided if it is.
         if use_spatial_transformer:
             assert context_dim is not None, 'Fool!! You forgot to include the dimension of your cross-attention conditioning...'
 
@@ -482,7 +485,7 @@ class UNetModel(nn.Module):
             if type(context_dim) == ListConfig:
                 context_dim = list(context_dim)
 
-        # NOTE: Handle default values for attention head configurations.
+        # STEP: Handle default values for attention head configurations.
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
 
@@ -492,7 +495,7 @@ class UNetModel(nn.Module):
         if num_head_channels == -1:
             assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
 
-        # NOTE: Initialize basic parameters and assertions.
+        # STEP: Initialize basic parameters and assertions.
         self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -504,21 +507,23 @@ class UNetModel(nn.Module):
         if isinstance(num_res_blocks, int):
             self.num_res_blocks = len(channel_mult) * [num_res_blocks]
 
-        # NOTE: Use own set of numbers of res block per resolution
+        # STEP: Use own set of numbers of res block per resolution
         else:
             if len(num_res_blocks) != len(channel_mult):
                 raise ValueError("provide num_res_blocks either as an int (globally constant) or "
                                 "as a list/tuple (per-level) with the same length as channel_mult")
             self.num_res_blocks = num_res_blocks
 
-        # TODO: Stop here
-        # TODO: To draw out architecture of UNet from Pytorch SD repo to understand
         # how this code works
-        # NOTE: Validate disable_self_attentions format if provided.
+        # STEP: Validate disable_self_attentions format if provided.
         if disable_self_attentions is not None:
             assert len(disable_self_attentions) == len(channel_mult)
 
         # NOTE: Validate num_attention_blocks format and its relation to num_res_blocks.
+        # NOTE: Assert that if attention blocks are being used, based on architecture of SD,
+        # Criteria 1: The number of occurrences of attention blocks == number of occurences of res blocks since attention blocks
+        # performs attention on the output of the res blocks
+        # Criteria 2: The number of res blocks in each occurence is more than the number of attention blocks
         if num_attention_blocks is not None:
             assert len(num_attention_blocks) == len(self.num_res_blocks)
             assert all(map(lambda i: self.num_res_blocks[i] >= num_attention_blocks[i], range(len(num_attention_blocks))))
@@ -527,8 +532,8 @@ class UNetModel(nn.Module):
                 f"i.e., in cases where num_attention_blocks[i] > 0 but 2**i not in attention_resolutions, "
                 f"attention will still not be set.")
 
-        # NOTE: Initialize attention resolutions and other parameters.
-        self.attention_resolutions = attention_resolutions
+        # STEP: Initialize attention resolutions and other parameters.
+        self.attention_resolutions = attention_resolutions # at which resolutions attention is performed at
         self.dropout = dropout
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
@@ -540,7 +545,7 @@ class UNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
 
-        # NOTE: Initialize time embedding layer to embed time information into the feature space.
+        # STEP: Initialize time embedding layer to embed time information into the feature space.
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),   # NOTE: Linear transformation from model_channels to time_embed_dim.
@@ -548,7 +553,7 @@ class UNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),   # NOTE: Second linear transformation.
         )
 
-        # NOTE: Initialize label embedding if num_classes is provided.
+        # STEP: Initialize label embedding if num_classes is provided.
         if self.num_classes is not None:
             if isinstance(self.num_classes, int):
                 self.label_emb = nn.Embedding(num_classes, time_embed_dim)   # NOTE: Embedding for discrete classes.
@@ -558,7 +563,9 @@ class UNetModel(nn.Module):
             else:
                 raise ValueError()
 
-        # NOTE: Initialize input blocks as a list of modules for initial processing.
+        # STEP: Initialize input blocks as a list of modules for initial processing.
+        # the first block that takes in the latent in its original number of channels and 
+        # increases channel to first layer's channel requirements
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
@@ -571,7 +578,14 @@ class UNetModel(nn.Module):
         ch = model_channels
         ds = 1
 
-        # NOTE: Iterate through levels and channel multipliers to build the model structure.
+        # STEP: Iterate through levels and channel multipliers to build the model structure.
+        # channel_mult=(1, 2, 4, 8) which represents factor to multiply number of channels
+        # at each level
+        # i.e. at first layer, have 1 ResBlock with number of channels as 1 * model_channels
+        # and at second layer, have 2 ResBlock with number of channels as 2 * model_channels
+        # and so on
+        # NOTE: use_scale_shift_norm variable is used to determine whether to apply a specific type of
+        # normalization that includes both scaling and shifting the normalized tensor based on the embedding
         for level, mult in enumerate(channel_mult):
             for nr in range(self.num_res_blocks[level]):
                 layers = [
@@ -587,7 +601,14 @@ class UNetModel(nn.Module):
                 ]
                 ch = mult * model_channels
 
-                # NOTE: Add attention block if specified by attention_resolutions.
+                # STEP: Add attention block if specified by attention_resolutions.
+                '''
+                :param attention_resolutions: a collection of downsample rates at which
+                attention will take place. May be a set, list, or tuple.
+                For example, if this contains 4, then at 4x downsampling, attention
+                will be used.
+                '''
+                # if checks if the current resolutions is at where attention is to be performed
                 if ds in attention_resolutions:
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
@@ -597,13 +618,24 @@ class UNetModel(nn.Module):
 
                     # NOTE: Handle legacy and attention configurations.
                     if legacy:
+                        # num_head_channels is a specified number of heads to use
                         dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
                     if exists(disable_self_attentions):
                         disabled_sa = disable_self_attentions[level]
                     else:
                         disabled_sa = False
 
-                    # NOTE: Add attention block or spatial transformer based on configurations.
+                    # STEP: Add attention block or spatial transformer based on configurations.
+                    # NOTE: spatial_transformer: a modified transformer block for image data
+                    '''
+                    # NOTE: use_new_attention_order determines if we split into qkv or heads first
+                    if use_new_attention_order:
+                        # split qkv before split heads
+                        self.attention = QKVAttention(self.num_heads)
+                    else:
+                        # split heads before split qkv
+                        self.attention = QKVAttentionLegacy(self.num_heads)
+                    '''
                     if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
                         layers.append(
                             AttentionBlock(
@@ -693,6 +725,7 @@ class UNetModel(nn.Module):
 
         # NOTE: Initialize output blocks for upsampling and final output generation.
         self.output_blocks = nn.ModuleList([])
+        # channel_mult = [1,2,4,8] -- channel_mult[::-1] --> [8,4,2,1]
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(self.num_res_blocks[level] + 1):
                 ich = input_block_chans.pop()
@@ -767,6 +800,7 @@ class UNetModel(nn.Module):
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
+            # TODO: 
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
 
