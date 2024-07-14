@@ -18,24 +18,34 @@ from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
-# TODO: 06/07/24 Stop here
-# TODO: Look into this UNet model first - What is this UNetModel?
+# NOTE: This class is similar to the UNetModel, just that it has additional
+# control added to the output of the middle block and output of blocks from the
+# output blocks
 class ControlledUnetModel(UNetModel):
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         hs = []
         with torch.no_grad():
+            # STEP: Get time embedding
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
             emb = self.time_embed(t_emb)
+            
+            # STEP: Run input through input blocks
             h = x.type(self.dtype)
             for module in self.input_blocks:
                 h = module(h, emb, context)
+                # NOTE: Output of each block is stored in array hs
+                # to be used in skip connection later on with output blocks
                 hs.append(h)
+            # STEP: Run input through middle block
             h = self.middle_block(h, emb, context)
         
         if control is not None:
             h += control.pop()
 
+        # STEP: Run input through output block
         for i, module in enumerate(self.output_blocks):
+            
+            # NOTE: If no control is used,
             if only_mid_control or control is None:
                 h = torch.cat([h, hs.pop()], dim=1)
             else:
@@ -83,10 +93,12 @@ class ControlNet(nn.Module):
 
         if context_dim is not None:
             assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
+            # NOTE: omegaconf is used to handle YAML configuration files
             from omegaconf.listconfig import ListConfig
             if type(context_dim) == ListConfig:
                 context_dim = list(context_dim)
 
+        # STEP: Determine number of heads and dimension of each head
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
 
@@ -100,6 +112,7 @@ class ControlNet(nn.Module):
         self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
+        # STEP: Determine number of ResBlock at each resolution of UNet
         if isinstance(num_res_blocks, int):
             self.num_res_blocks = len(channel_mult) * [num_res_blocks]
         else:
@@ -107,9 +120,11 @@ class ControlNet(nn.Module):
                 raise ValueError("provide num_res_blocks either as an int (globally constant) or "
                                  "as a list/tuple (per-level) with the same length as channel_mult")
             self.num_res_blocks = num_res_blocks
+        # STEP: Determine which layers to perform self attention
         if disable_self_attentions is not None:
-            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
+            # NOTE: should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
             assert len(disable_self_attentions) == len(channel_mult)
+        # STEP: Ensure that number of attention blocks is consistent
         if num_attention_blocks is not None:
             assert len(num_attention_blocks) == len(self.num_res_blocks)
             assert all(map(lambda i: self.num_res_blocks[i] >= num_attention_blocks[i], range(len(num_attention_blocks))))
@@ -129,6 +144,7 @@ class ControlNet(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
 
+        # STEP: Get time embeddings and layers for time embeddings
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
@@ -136,6 +152,7 @@ class ControlNet(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
+        # STEP: Prepare layers for input blocks
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
@@ -143,9 +160,13 @@ class ControlNet(nn.Module):
                 )
             ]
         )
+
+        # STEP: Prepare layers for zero convolutions
         self.zero_convs = nn.ModuleList([self.make_zero_conv(model_channels)])
 
         self.input_hint_block = TimestepEmbedSequential(
+            # NOTE: change dims from hint_channels to 16
+            # NOTE: def conv_nd(dims, *args, **kwargs):
             conv_nd(dims, hint_channels, 16, 3, padding=1),
             nn.SiLU(),
             conv_nd(dims, 16, 16, 3, padding=1),
@@ -160,6 +181,9 @@ class ControlNet(nn.Module):
             nn.SiLU(),
             conv_nd(dims, 96, 256, 3, padding=1, stride=2),
             nn.SiLU(),
+            # NOTE: the self.input_hint_block will not be a matrix of zeros in its entirety. The zero_module
+            # function only affects the parameters of the last convolutional layer in the TimestepEmbedSequential sequence,
+            # setting them to zero.
             zero_module(conv_nd(dims, 256, model_channels, 3, padding=1))
         )
 
@@ -167,7 +191,9 @@ class ControlNet(nn.Module):
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
+        # STEP: Build model at each resolution level
         for level, mult in enumerate(channel_mult):
+            # STEP: Build layes within each resolution level
             for nr in range(self.num_res_blocks[level]):
                 layers = [
                     ResBlock(
@@ -209,10 +235,17 @@ class ControlNet(nn.Module):
                                 use_checkpoint=use_checkpoint
                             )
                         )
+                # STEP: Add current layers at current resolution level into list of input blocks
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
+                # STEP: Add a zero conv layer at the end of each block
+                # in this case, a block refers to the many layers from one resolution
+                # NOTE: A zero convolution is used at the end of every block within a block of layers
+                # at each resolution
                 self.zero_convs.append(self.make_zero_conv(ch))
                 self._feature_size += ch
                 input_block_chans.append(ch)
+            # STEP: If not at last layer of input blocks, perform Downsample
+            # to reduce resolutions
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
@@ -235,6 +268,8 @@ class ControlNet(nn.Module):
                 )
                 ch = out_ch
                 input_block_chans.append(ch)
+                # NOTE: The entire chunk of layers at a specific layer is also considered a Block
+                # and zero convolution is applied to the end as well
                 self.zero_convs.append(self.make_zero_conv(ch))
                 ds *= 2
                 self._feature_size += ch
@@ -247,6 +282,7 @@ class ControlNet(nn.Module):
         if legacy:
             # num_heads = 1
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+        # STEP: Construct middle block
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -283,11 +319,16 @@ class ControlNet(nn.Module):
         return TimestepEmbedSequential(zero_module(conv_nd(self.dims, channels, channels, 1, padding=0)))
 
     def forward(self, x, hint, timesteps, context, **kwargs):
+
+        # STEP: Get time embeddings
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
 
+        # STEP: Get embedding hint
         guided_hint = self.input_hint_block(hint, emb, context)
 
+        # STEP: Get the output of each layer which has been passed through
+        # zero convolution
         outs = []
 
         h = x.type(self.dtype)
@@ -305,7 +346,7 @@ class ControlNet(nn.Module):
 
         return outs
 
-
+# TODO: Stop here
 class ControlLDM(LatentDiffusion):
 
     def __init__(self, control_stage_config, control_key, only_mid_control, *args, **kwargs):
